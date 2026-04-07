@@ -16,11 +16,13 @@ Ibrahim et al. ("Simple and Scalable Strategies to Continually Pre-train Large L
 
 The optimal peak LR for CPT depends heavily on the token budget:
 
-| CPT budget | Recommended peak LR (relative to original) | Source |
-|---|---|---|
-| >100B tokens | **1× (same as original)** | Ibrahim et al. 2024, Gupta et al. 2023 |
-| 5–50B tokens | **1/3× to 1/10× of original** | TiC-LM (arXiv:2504.02107), "Reuse Don't Retrain" (arXiv:2407.07263) |
-| <5B tokens | **1/10× to 1/30× of original** | TiC-LM 2025 |
+
+| CPT budget   | Recommended peak LR (relative to original) | Source                                                              |
+| ------------ | ------------------------------------------ | ------------------------------------------------------------------- |
+| >100B tokens | **1× (same as original)**                  | Ibrahim et al. 2024, Gupta et al. 2023                              |
+| 5–50B tokens | **1/3× to 1/10× of original**              | TiC-LM (arXiv:2504.02107), "Reuse Don't Retrain" (arXiv:2407.07263) |
+| <5B tokens   | **1/10× to 1/30× of original**             | TiC-LM 2025                                                         |
+
 
 For the **5–20B token range** this guide targets: use approximately **1/3× to 1/10× of the original pretraining peak LR**. At 7B (where original peak is typically ~3e-4), this means a CPT peak of **3e-5 to 1e-4**. At 70B (where original peak is ~1.5e-4), aim for **1e-5 to 5e-5**. Code Llama (arXiv:2308.12950) used 1e-4 across 7B–70B for 500B tokens of code CPT; Llemma 34B (arXiv:2310.10631) used 5e-5 for 50B math tokens.
 
@@ -40,3 +42,4 @@ A critical and often overlooked tip: if possible, resume CPT from an **intermedi
 - **Decaying LR to zero**: The model cannot learn from late-stage high-quality data.
 
 ---
+
