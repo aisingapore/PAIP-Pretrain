@@ -26,17 +26,17 @@ The dataloader is organized into three nested layers, each solving a different p
 │  │  dataset_index[idx]        → which source dataset                │   │
 │  │  dataset_sample_index[idx] → which sample within that dataset    │   │
 │  │                                                                  │   │
-│  │  ┌─────────────────────┐  ┌─────────────────────┐               │   │
-│  │  │ GPTDataset (wiki)   │  │ GPTDataset (code)   │  ...          │   │
-│  │  │  LAYER 2            │  │  LAYER 2            │               │   │
-│  │  │  document_index     │  │  document_index     │               │   │
-│  │  │  sample_index       │  │  sample_index       │               │   │
-│  │  │  shuffle_index      │  │  shuffle_index      │               │   │
-│  │  │        ▼            │  │        ▼            │               │   │
-│  │  │  IndexedDataset     │  │  IndexedDataset     │               │   │
-│  │  │  LAYER 1            │  │  LAYER 1            │               │   │
-│  │  │  wiki.bin / .idx    │  │  code.bin / .idx    │               │   │
-│  │  └─────────────────────┘  └─────────────────────┘               │   │
+│  │  ┌─────────────────────┐  ┌─────────────────────┐                │   │
+│  │  │ GPTDataset (wiki)   │  │ GPTDataset (code)   │  ...           │   │
+│  │  │  LAYER 2            │  │  LAYER 2            │                │   │
+│  │  │  document_index     │  │  document_index     │                │   │
+│  │  │  sample_index       │  │  sample_index       │                │   │
+│  │  │  shuffle_index      │  │  shuffle_index      │                │   │
+│  │  │        ▼            │  │        ▼            │                │   │
+│  │  │  IndexedDataset     │  │  IndexedDataset     │                │   │
+│  │  │  LAYER 1            │  │  LAYER 1            │                │   │
+│  │  │  wiki.bin / .idx    │  │  code.bin / .idx    │                │   │
+│  │  └─────────────────────┘  └─────────────────────┘                │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
