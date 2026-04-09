@@ -1,0 +1,27 @@
+# Tokenizer
+tokenizer_model: Qwen/Qwen3-4B
+tokenizer_type: HuggingFaceTokenizer
+
+# Preprocessing backend:
+#   "mp"    — multiprocessing (default, no Java required)
+#             uses megatron_yuli/tools/preprocess_data.py
+#   "spark" — PySpark (requires Java 17+ installed and JAVA_HOME set)
+#             uses scripts/data_prep/preprocess_data_spark.py
+preprocess_backend: mp
+
+# Path to megatron_yuli repo root (used for mp backend)
+megatron_lm_dir: /mnt/weka/aisg/source_files/megatron_yuli
+
+# Processing
+workers: 20
+log_interval: 100000
+data_file_extension: jsonl
+skip_processed: true
+
+# File grouping: group small JSONL files into batches for efficient PySpark processing
+# (used only when preprocess_backend=spark)
+group_target_size_gb: 10
+group_mean_threshold_gb: 5
+
+# Verification
+verification_num_samples: 20

@@ -4,3 +4,4 @@ instruction.md
 dev.md
 CLAUDE.md
 .backup
+*pycache*
