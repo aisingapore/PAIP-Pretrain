@@ -5,3 +5,5 @@ dev.md
 CLAUDE.md
 .backup
 *pycache*
+nemo_experiments
+logs
