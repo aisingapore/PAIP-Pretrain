@@ -24,7 +24,7 @@ END {
     printf "Average GPU Utilization: %.2f TFLOP/s/GPU\n", sum_gpu/count
 }
 ' $1
-MEM_ALLOC=$(awk -F'mem-allocated-gigabytes: ' '/mem-allocated-gigabytes:/ {split($2, a, " "); print a[1]}' logs/test.log)
+MEM_ALLOC=$(awk -F'mem-allocated-gigabytes: ' '/mem-allocated-gigabytes:/ {split($2, a, " "); print a[1]}' $1)
 echo "Allocated Memory (GB): ${MEM_ALLOC}"
 
 

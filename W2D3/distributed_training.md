@@ -329,15 +329,69 @@ The sharding of model parameters requires all-gather operations to be performed 
 
 Read the section entitled "Tensor Parallelism" in the [Nanotron UltraScale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=tensor_parallelism).
 
+Answer the following questions:
 
-# References
+1. What are the two main types of sharding strategies used in tensor parallelism? What are the distributed communication operations used in each type of tensor parallelism?
 
-* [Nanotron UltraScale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=high-level_overview)
-* [Cuda Programming Guide - Cuda Streams](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#streams)
-* [PyTorch documentation on CUDA streams](https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-streams)
-* [Explanation of Pytorch Distributed Data Parallelism](https://medium.com/@arjunsrinivasan.a/demystifying-pytorch-distributed-data-parallel-ddp-an-inside-look-6d0d42a645ff)
-* [Visualizing 6D Mesh Parallelism](https://main-horse.github.io/posts/visualizing-6d/#pipelining-and-fsdp)
-* [DeepSpeed Pipeline Paralleism](https://www.deepspeed.ai/tutorials/pipeline/)
-* [Megatron Parallelism Guide](https://docs.nvidia.com/nemo/megatron-bridge/latest/parallelisms.html#data-parallelism)
-* [Megatron Performance Guide](https://docs.nvidia.com/nemo/megatron-bridge/latest/performance-guide.html#long-sequence-training)
-* [PyTorch FSDP](https://arxiv.org/abs/2304.11277)
+2. What is the optimal ordering of these sharding strategies in a feedforward multi-layer perceptron (MLP) block?
+
+3. Explain the trade-off between the memory savings and communication overhead arising from the use of tensor parallelism.
+
+4. Can tensor parallelism (TP) scale across nodes effectively? Why or why not?
+
+5. How does sequence parallelism (SP) complement tensor parallelism?
+
+6. How does the communication cost of using TP and SP together compare with the cost of using TP alone?
+
+
+## Practical
+
+All results from this point onwards were obtained on SMC. The preceding results were obtained on Hopper.
+
+1. Investigate the effect of setting the TP degree to 1, 2 and 4 with all other parameters set to their default values. The relevant parameter to be changed in [qwen3_pretrain_override.yaml](./qwen3_pretrain_override.yaml) is `tensor_model_parallel_size`. Ensure to set the world size to the same value as the TP degree. Explain the observed trends in throughput and memory utilization per GPU.
+
+---Answer Begin---
+
+| TP Degree | Step time (s) | Throughput per GPU (TFLOP/s/GPU) | Memory per GPU (GB) |
+| --- | --- | --- | --- |
+| 1 | 3.34 | 245.69 | 73.65 |
+| 2 | 3.84 | 106.72 | 37.03 |
+| 4 | 3.86 | 53.21 | 18.61 |
+
+The throughput per GPU decreases by at least 50% each time the TP degree is doubled. This is a direct consequence of the communication cost associated with TP, since the communication operations cannot be effectively overlapped with the forward and backward passes. 
+
+The memory allocated per GPU decreases by approximately 50% each time the TP degree is doubled. This is because the model parameters and activations are sharded across increasing number of TP ranks. 
+
+
+---Answer End---
+
+2. Repeat the runs in question 1 with sequence parallelism enabled for the cases TP=2 and 4 only. How do the throughput and memory utilization compare with the corresponding runs in question 1? Use the PyTorch profiler to explain the observed changes in the throughput between the TP only and TP + SP cases. 
+
+---Answer Begin---
+
+| TP Degree | Step time (s) | Throughput per GPU (TFLOP/s/GPU) | Memory per GPU (GB) |
+| --- | --- | --- | --- |
+| 2 | 4.21 | 97.48 | 37.03 |
+| 4 | 4.34 | 47.22 | 18.63 |
+
+Enabling sequence parallelism reduces the throughput slightly as compared to using TP only. The PyTorch profiling trace shows that there is better overlap of the all-reduce communication operations with computation for the TP only case. When using TP in combination with SP, there are significant segments of the profiler trace where the communication blocks the computation, especially for the all-gather operation. 
+
+The memory utilization remains unchanged since the activations only account for a small proportion of the VRAM utilization, since a short sequence length of 1024 was used.
+
+---Answer End---
+
+3. Is it feasible to run the training on a single GPU for a long sequence length of 16384? How does the use of TP help in such cases?
+
+---Answer Begin---
+
+One encounters a CUDA Out of Memory error if the training is performed on a single GPU. At long sequence lengths, the activations account for a significant proportion of the vRAM usage. Even sharding the activations across just two GPUs using TP = 2 is sufficient to make the training feasible.
+
+---Answer End---
+
+# Context Parallelism
+
+## Theory
+
+Read the section entitled "Context Parallelism" in the [Nanotron UltraScale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=context_parallelism).
+
+Answer the following questions:

@@ -3,13 +3,13 @@
 # Top-level ConfigContainer fields are dataclasses themselves
 
 model:
-  tensor_model_parallel_size: 1
+  tensor_model_parallel_size: 2
   pipeline_model_parallel_size: 1
   pipeline_dtype: torch.bfloat16
   context_parallel_size: 1
   expert_model_parallel_size: 1
   sequence_parallel: false
-  seq_length: 1024
+  seq_length: 16384
   # Activation recomputation
   # See megatron-lm/megatron/core/transformer/transformer_config.py for explanation of parameters
   # Options are None (default), "full", "selective". Comment out next line to disable activation recomputation.
@@ -42,13 +42,6 @@ optimizer:
   adam_beta2: 0.95
   adam_eps: 1e-5
   use_distributed_optimizer: false
-  # Muon settings
-  muon_momentum: 0.9
-  muon_use_nesterov: true
-  muon_scale_mode: spectral
-  muon_fp32_matmul_prec: medium
-  muon_num_ns_steps: 5
-  muon_tp_mode: distributed
 
 
 scheduler:
@@ -73,14 +66,10 @@ logger:
   log_interval: 1
   log_throughput: true
   log_progress: true
-  # wandb_project: test-muon
-  # wandb_exp_name: qwen-muon
-  # wandb_entity: joc
-  # wandb_save_dir: wandb
 
 dataset:
   # Must be equal to model.seq_length
-  sequence_length: 1024
+  sequence_length: 16384
 
 rng:
   seed: 1234
