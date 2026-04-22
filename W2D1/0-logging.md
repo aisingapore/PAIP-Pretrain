@@ -102,39 +102,80 @@
 
   **Core Training Metrics** (logged every `tensorboard_log_interval` steps by the training loop)
 
-  | Metric | Unit | Description | How obtained |
-  |---|---|---|---|
-  | `lm loss` | nats | Language model cross-entropy loss. Primary training signal. | Computed in `forward_step()` loss function, averaged over tokens, reduced across DP ranks and microbatches. |
-  | `mtp_1 loss`, `mtp_2 loss`, ... | nats | Per-head auxiliary loss for Multi-Token Prediction (only when MTP enabled). | Each MTP prediction head returns a separate loss via `MTPLossLoggingHelper`. |
-  | `learning-rate` | float | Current learning rate from the LR scheduler. | Read from the optimizer's param scheduler via `get_canonical_lr_for_logging()`. |
-  | `grad-norm` | float | Global L2 norm of all gradients after clipping. | Computed during the optimizer step as part of gradient clipping. |
-  | `params-norm` | float | L2 norm of all model parameters. | Computed via `calc_params_l2_norm()` over all model parameters with `requires_grad`. |
-  | `loss-scale` | float | Dynamic loss scaler value for mixed-precision training. | Read from the optimizer's internal AMP loss scaler via `optimizer.get_loss_scale()`. |
-  | `batch-size` | count | Global batch size for the step (= `micro_batch_size * data_parallel_size * num_microbatches`). | Computed from config. |
-  | `iteration-time` | seconds | Wall-clock time for one training step. | Derived: `elapsed_time / total_iterations` over the logging interval. |
-  | `samples vs steps` | count | Cumulative consumed training samples, indexed by global step. | Tracked by the training state counter. |
-  | `skipped-train-samples` | count | Samples skipped due to loss-scale underflow or NaN detection. | Tracked by the training state counter. |
+  **`lm loss`** (unit: nats) — Language model cross-entropy loss. This is the primary training signal.
 
-  Interpretation: If `loss-scale` is monotonically decreasing and hitting the minimum floor, gradients contain too many NaN/Inf values — a sign of training instability. If `grad-norm` spikes without a corresponding loss spike, a single layer may be exploding (check per-layer norms below).
+  The loss goes through a multi-stage reduction pipeline before it reaches W&B:
+  1. **Per-token loss**: The model's `forward_step()` produces per-token cross-entropy values in `output_tensor` (shape: `[seq_length]`).
+  2. **Mask and sum**: The loss function multiplies element-wise by `loss_mask` (which zeros out padding tokens) and sums: `loss = torch.sum(losses * loss_mask)`. It also counts non-padded tokens: `num_tokens = loss_mask.sum()`.
+  3. **Reporting format**: The loss is packed as a 2-element tensor `[loss_sum, num_tokens]` — this format allows correct averaging later.
+  4. **Microbatch accumulation**: Each training step processes multiple microbatches. The 2-element tensors from all microbatches are stacked and summed column-wise: `val = torch.vstack(val).sum(dim=0)`.
+  5. **DP reduction**: The summed `[loss_sum, num_tokens]` tensor is all-reduced (SUM) across all data-parallel and context-parallel ranks.
+  6. **Final average**: `lm_loss = loss_sum / num_tokens` — a properly token-weighted average across all microbatches and all DP ranks.
+
+  This token-weighted reduction is why the loss is accurate even when microbatches have different numbers of non-padded tokens (e.g., with variable-length packing).
+
+  **`mtp_1 loss`, `mtp_2 loss`, ...** (unit: nats) — Per-head auxiliary loss for Multi-Token Prediction (only when MTP is enabled). Each MTP prediction head computes its own cross-entropy following the same pipeline as `lm loss`. Logged via `MTPLossLoggingHelper.track_mtp_metrics()`, which scales each loss by `1 / num_microbatches` before logging.
+
+  **`learning-rate`** (unit: float) — Current learning rate from the LR scheduler. Read directly from the optimizer's parameter groups: iterates through `optimizer.param_groups` and returns the `'lr'` value from the first group marked `default_config=True`. All default-config groups share the same LR schedule, so any one is representative. On ranks without trainable parameters, this is `None` and gets filled in via `reduce_max_stat_across_model_parallel_group`.
+
+  **`grad-norm`** (unit: float) — Global L2 norm of all gradients, computed **before** gradient clipping. The computation:
+  1. On each rank, collect all gradient tensors (`p.main_grad` for each parameter with `requires_grad`).
+  2. Compute the local L2 norm using Apex's `multi_tensor_l2norm` kernel (a fused CUDA operation that processes all gradient tensors in a single kernel launch for efficiency).
+  3. Square the local norm: `total_norm = local_l2_norm ** 2`.
+  4. All-reduce (SUM) the squared norm across all data-parallel and model-parallel ranks.
+  5. Take the square root: `final_grad_norm = total_norm ** 0.5`.
+
+  After this norm is computed, gradient clipping scales all gradients by `clip_coeff = max_norm / (grad_norm + 1e-6)` if `clip_coeff < 1.0`. The logged `grad-norm` is the **pre-clipping** value — it tells you the "raw" gradient magnitude before any clipping intervention.
+
+  **`params-norm`** (unit: float) — L2 norm of all model parameters. Computed similarly to `grad-norm` but over parameter values instead of gradients:
+  1. Parameters are separated into three groups: dense parameters, MoE (Mixture-of-Experts) parameters, and sharded main parameters (for FSDP). Each group needs different reduction strategies because they are sharded differently across ranks.
+  2. For each group, the local L2 norm is computed via `multi_tensor_l2norm`, squared, and all-reduced (SUM) across the appropriate parallel groups (DP + TP + PP for dense; DP + TP + EP + PP for MoE).
+  3. BF16 parameters are converted to FP32 (via the optimizer's `.main_param` attribute) before norm computation to avoid precision issues.
+  4. All squared norms are summed and the final result is `sqrt(total_squared_norm)`.
+
+  **`loss-scale`** (unit: float) — Dynamic loss scaler value for mixed-precision (FP16/BF16) training. The loss scaler is a state machine that prevents gradient underflow/overflow:
+  - **Scale-down**: When NaN or Inf values are detected in gradients, a `hysteresis_tracker` counts down. After `hysteresis` consecutive NaN iterations, the scale is reduced: `scale = max(scale * backoff_factor, min_scale)`. The `min_scale` is the floor (e.g., 1.0) below which the scaler cannot go.
+  - **Scale-up**: When no NaN/Inf is detected, a `growth_tracker` increments. After `growth_interval` consecutive clean iterations, the scale increases: `scale = scale * growth_factor`.
+  - The logged value is `optimizer.get_loss_scale().item()` — the current scale at that step.
+
+  A monotonically decreasing `loss-scale` that hits the `min_scale` floor means the model is consistently producing NaN/Inf gradients — a sign of severe training instability (typically caused by too-high learning rate, data corruption, or numerical issues in the model architecture).
+
+  **`batch-size`** (unit: count) — Global batch size for the step, computed as `micro_batch_size * data_parallel_size * num_microbatches`. This is the total number of samples processed across all GPUs in one training step. Logged from config, not measured.
+
+  **`iteration-time`** (unit: seconds) — Average wall-clock time per training step over the most recent logging interval. Computed as:
+  ```
+  iteration-time = elapsed_time / total_iterations
+  ```
+  where `elapsed_time` comes from a barrier-synchronized timer (`timers('interval-time').elapsed(barrier=True)`) that includes all-reduce, optimizer step, and data loading time. The barrier ensures all ranks have finished before measuring, so this captures the slowest rank's time (i.e., straggler effects are visible here).
+
+  **`samples vs steps`** (unit: count) — Cumulative consumed training samples, tracked by the training state counter (`train_state.consumed_train_samples`). Incremented by `global_batch_size` each step. This provides an alternative x-axis for W&B charts — useful when comparing runs with different batch sizes.
+
+  **`skipped-train-samples`** (unit: count) — Samples skipped when the loss scaler detects NaN/Inf in gradients and the optimizer step is skipped. Only logged when `> 0`.
 
   ---
 
   **Throughput Metrics** (rolling window average, from `report_throughput()`)
 
-  These are rolling averages over a window (default: 20 steps, set by `cfg.logger.throughput_window_size`).
+  These metrics use a rolling window to smooth out per-step variance. The implementation maintains a `deque(maxlen=window_size+1)` that stores the absolute wall-clock timestamp (`time.time() - start_time`) at each step. Once the deque has enough entries, throughput is computed over the most recent `window_size` steps (default: 20, set by `cfg.logger.throughput_window_size`):
 
-  | Metric | Unit | Scope | How obtained |
+  ```python
+  elapsed_wct = history_wct[-1] - history_wct[0]   # wall-clock span of the window
+  elapsed_samples = (iteration * GBS) - ((iteration - window_size) * GBS)
+  samples_per_sec = elapsed_samples / elapsed_wct
+  ```
+
+  | Metric | Unit | Scope | Formula |
   |---|---|---|---|
-  | `throughput/batches_per_sec` | batches/sec | Global (all GPUs) | Derived: `elapsed_batches / elapsed_wall_clock_time` over the rolling window. |
-  | `throughput/samples_per_sec` | samples/sec | Global | Derived: `elapsed_samples / elapsed_wall_clock_time`. |
-  | `throughput/tokens_per_sec` | tokens/sec | Global | Derived: `elapsed_tokens / elapsed_wall_clock_time`. |
-  | `throughput/device/batches_per_sec` | batches/sec | Per GPU | Derived: global value / `world_size`. |
-  | `throughput/device/samples_per_sec` | samples/sec | Per GPU | Derived: global value / `world_size`. |
-  | `throughput/device/tokens_per_sec` | tokens/sec | Per GPU | Derived: global value / `world_size`. |
-  | `throughput/tflops/device` | TFLOP/s | Per GPU | Derived from model FLOP count (see formula below). |
-  | `throughput/tflops` | TFLOP/s | Global (all GPUs) | `throughput/tflops/device * world_size`. |
+  | `throughput/batches_per_sec` | batches/sec | Global (all GPUs) | `window_size / elapsed_wct` |
+  | `throughput/samples_per_sec` | samples/sec | Global | `(window_size * global_batch_size) / elapsed_wct` |
+  | `throughput/tokens_per_sec` | tokens/sec | Global | `(window_size * global_batch_size * seq_length) / elapsed_wct` |
+  | `throughput/device/batches_per_sec` | batches/sec | Per GPU | `throughput/batches_per_sec / world_size` |
+  | `throughput/device/samples_per_sec` | samples/sec | Per GPU | `throughput/samples_per_sec / world_size` |
+  | `throughput/device/tokens_per_sec` | tokens/sec | Per GPU | `throughput/tokens_per_sec / world_size` |
 
-  `throughput/tflops/device` is the key efficiency indicator — it tells you how well you're utilizing the hardware. The formula:
+  No data is logged until the deque fills up (i.e., the first `window_size` steps produce no throughput metrics). If the window's elapsed wall-clock time is zero or negative (can happen during checkpoint resumption), the calculation is skipped entirely to avoid division by zero.
+
+  **`throughput/tflops/device`** (unit: TFLOP/s per GPU) — Model FLOP utilization per GPU. This is the key hardware efficiency indicator. Unlike the rolling-window metrics above, this is computed from the logging-interval timer:
 
   ```
   throughput/tflops/device = num_floating_point_operations(config, batch_size)
@@ -143,7 +184,9 @@
                              / 1e12
   ```
 
-  Where `num_floating_point_operations` counts the FLOPs for one training step (forward + backward). For a standard Transformer model, the FLOP count is:
+  **`throughput/tflops`** (unit: TFLOP/s total) — `throughput/tflops/device * world_size`.
+
+  The `num_floating_point_operations` function counts all multiply-accumulate operations in the model. For a standard Transformer:
 
   ```
   flops = batch_size * seq_length * (
@@ -156,7 +199,7 @@
   )
   ```
 
-  The 12x factor comes from: 3x (forward + backward wgrad + backward dgrad) * 2x (two stacked GEMMs per block) * 2x (multiply-accumulate = 2 FLOPs per element). See [Narayanan et al., 2021, Appendix](https://arxiv.org/abs/2104.04473) for the derivation.
+  The 12x factor comes from: 3x (forward + backward wgrad + backward dgrad) * 2x (two stacked GEMMs per block) * 2x (multiply-accumulate = 2 FLOPs per element). See [Narayanan et al., 2021, Appendix](https://arxiv.org/abs/2104.04473) for the derivation. Note this counts **model FLOPs only** — it excludes data loading, communication, and optimizer overhead, so the reported TFLOP/s will always be lower than the GPU's theoretical peak.
 
   Interpretation: For H100 GPUs with BF16, well-optimized configs achieve 150-180 MODEL_TFLOP/s per GPU. A sudden 30% drop usually indicates a straggler node (check per-node NCCL logs) or a data loading bottleneck.
 
@@ -164,31 +207,40 @@
 
   **Memory Metrics** (from `report_memory()`, converted to GB)
 
-  All memory metrics are read from `torch.cuda.memory_stats()` and converted from bytes to gigabytes (`GB = bytes / 1e9`).
+  All memory metrics are read from `torch.cuda.memory_stats()` and converted from bytes to gigabytes (`GB = bytes / 1e9`, rounded to 5 significant digits). To understand these metrics, you need to know how PyTorch's CUDA caching allocator works:
 
-  | Metric | Description | Use case |
+  - When a tensor is created, PyTorch requests a memory block from the caching allocator. The allocator either reuses a cached free block or calls `cudaMalloc` to get a new one from the GPU driver.
+  - When a tensor is freed (`del tensor` or goes out of scope), the memory is returned to the **cache**, not back to the GPU driver. This avoids expensive `cudaMalloc`/`cudaFree` calls.
+  - **Reserved** memory = everything the allocator has obtained from the driver (both in-use and cached free blocks).
+  - **Allocated** memory = blocks that have been handed out to tensors (some may have been freed but the block isn't returned to the free pool yet).
+  - **Active** memory = blocks currently containing at least one live tensor.
+  - **Inactive split** memory = free sub-blocks created when a large cached block is split to satisfy a smaller allocation. These fragments cannot be returned to the driver because they're part of a larger `cudaMalloc` region.
+
+  The relationship is: `reserved >= allocated >= active`, and `inactive_split` represents fragmentation overhead within allocated blocks.
+
+  | Metric | What it measures | What to watch for |
   |---|---|---|
-  | `memory/current_allocated_gigabytes` | Currently allocated GPU memory. | Baseline memory footprint per step. |
-  | `memory/current_active_gigabytes` | Currently active (in-use) memory. | Memory actually being used by tensors right now. |
-  | `memory/current_inactive_gigabytes` | Inactive but non-releasable memory. | Fragmentation indicator — high values mean the allocator is holding blocks it can't free. |
-  | `memory/current_reserved_gigabytes` | Reserved by PyTorch's CUDA caching allocator. | Total memory claimed from the GPU driver. |
-  | `memory/peak_allocated_gigabytes` | High-water mark for allocated memory. | Maximum memory needed during training (usually during backward pass). |
-  | `memory/peak_active_gigabytes` | High-water mark for active memory. | Maximum simultaneously active tensors. |
-  | `memory/peak_inactive_gigabytes` | High-water mark for inactive memory. | Worst-case fragmentation. |
-  | `memory/peak_reserved_gigabytes` | High-water mark for reserved memory. | How close you are to OOM — compare with GPU total memory. |
-  | `memory/alloc_retries` | Count of failed `cudaMalloc` calls that triggered a cache flush and retry. | `alloc_retries > 0` means the allocator had to evict cached blocks to satisfy a request — a warning sign you are near OOM. |
+  | `memory/current_allocated_gigabytes` | Total bytes in blocks that have been allocated (handed out by the caching allocator), converted to GB. | Baseline memory footprint — this is your working set. |
+  | `memory/current_active_gigabytes` | Bytes in blocks containing at least one live (non-freed) tensor. | Memory actually being used by tensors right now. The gap between allocated and active indicates recently-freed tensors whose blocks haven't been recycled. |
+  | `memory/current_inactive_gigabytes` | Bytes in free sub-blocks created by block splitting (fragmentation). These blocks are cached but cannot be merged back. | High values mean the allocator has fragmented memory. This is normal during training warm-up but should stabilize. |
+  | `memory/current_reserved_gigabytes` | Total bytes reserved from the GPU driver by the caching allocator. | This is the actual GPU memory consumed as seen by `nvidia-smi`. The gap between reserved and allocated is the free cache (blocks available for reuse without calling `cudaMalloc`). |
+  | `memory/peak_allocated_gigabytes` | High-water mark for allocated memory since training started. | Maximum memory needed during training — usually peaks during backward pass when both activations and gradients exist simultaneously. |
+  | `memory/peak_active_gigabytes` | High-water mark for active memory. | Maximum simultaneously-live tensors. |
+  | `memory/peak_inactive_gigabytes` | High-water mark for inactive (fragmented) memory. | Worst-case fragmentation during training. |
+  | `memory/peak_reserved_gigabytes` | High-water mark for reserved memory. | How close you got to OOM — compare with GPU total memory (e.g., 80 GB for H100). |
+  | `memory/alloc_retries` | Count of failed `cudaMalloc` calls that triggered a cache flush and retry. The allocator frees all cached blocks and retries the allocation. | **Any value > 0 is a warning**: you are at the edge of OOM. The allocator had to evict its entire cache to satisfy a request. Frequent retries will degrade throughput significantly due to the cache flush overhead. |
 
   ---
 
   **Runtime Metrics** (from `report_runtime()`, time unit = hours)
 
-  | Metric | Unit | Description | How obtained |
-  |---|---|---|---|
-  | `time/remaining_estimate` | hours | Estimated time to `train_iters` completion. | Derived: `(elapsed_time / elapsed_fraction) * remaining_fraction`, where `elapsed_fraction = current_step / train_iters`. |
-  | `time/tokens` | count | Total consumed tokens so far. | Derived: `consumed_train_samples * seq_length`. |
-  | `time/samples` | count | Total consumed samples so far. | Directly from training state counter. |
-  | `time/batches` | count | Total consumed batches (= global step). | Directly from training state counter. |
-  | `time/total` | hours | Total elapsed wall-clock training time. | Derived: `(time.time() - start_time) / 3600`. |
+  | Metric | Unit | How obtained |
+  |---|---|---|
+  | `time/remaining_estimate` | hours | Extrapolates from current progress: computes `elapsed_fraction = current_step / train_iters`, then `remaining = (elapsed_time / elapsed_fraction) * (1 - elapsed_fraction) / 3600`. This assumes constant throughput — the estimate will be inaccurate if throughput changes (e.g., after adding/removing nodes, or during evaluation pauses). |
+  | `time/tokens` | count | `consumed_train_samples * seq_length`. This is the total number of tokens the model has been trained on, useful for comparing runs with different batch sizes or sequence lengths. |
+  | `time/samples` | count | Directly from the training state counter `train_state.consumed_train_samples`. Incremented by `global_batch_size` each step. |
+  | `time/batches` | count | `train_state.step` — the global step counter. Equivalent to the number of optimizer updates performed. |
+  | `time/total` | hours | `(time.time() - start_time) / 3600`. Wall-clock time since the training process started (not since the job was submitted — excludes queue wait time and initialization). |
 
   ---
 
@@ -196,23 +248,25 @@
 
   | Metric | Description |
   |---|---|
-  | `l2_norm/grad/global` | L2 norm across all model parameters. Equivalent to `grad-norm` but computed after gradient unscaling. |
+  | `l2_norm/grad/global` | L2 norm across all model parameters — `sqrt(sum of all per-layer squared norms)`. |
   | `l2_norm/grad/<layer_name>` | L2 norm for each individual named parameter that has a gradient (e.g., `l2_norm/grad/decoder.layers.0.self_attention.linear_qkv.weight`). |
 
-  These norms are computed by iterating over `model.named_parameters()` and calling `torch.linalg.vector_norm(p.main_grad)` for each parameter. The global norm is `sqrt(sum(per_layer_norm^2))`.
+  The computation iterates over `model.named_parameters()` and for each parameter with a non-`None` `main_grad`, computes `torch.linalg.vector_norm(p.main_grad)`. The global norm is then `sqrt(sum(per_layer_norm ** 2))`. Tensor results are converted to Python floats via `.item()` before logging.
 
-  Interpretation: This is the most granular diagnostic for gradient health. If `grad-norm` spikes, use per-layer norms to identify the responsible layer. Common culprits: embedding layers, the final LM head, or the first attention layer. Watch for layers where the norm is orders of magnitude larger than peers — this indicates localized instability.
+  Note: Unlike `grad-norm` (which is computed inside the optimizer's gradient clipping routine using the fused `multi_tensor_l2norm` kernel), `l2_norm/grad/*` is computed separately in `report_l2_norm_grad()` **after gradient unscaling**. The values should be very close but may differ slightly due to floating-point ordering.
+
+  Interpretation: This is the most granular diagnostic for gradient health. If `grad-norm` spikes, use per-layer norms to identify the responsible layer. Common culprits: embedding layers, the final LM head, or the first attention layer. Watch for layers where the norm is orders of magnitude larger than peers — this indicates localized instability that global `grad-norm` alone would not pinpoint.
 
   ---
 
   **Energy Metrics** (hardware-dependent, requires NVML support)
 
-  | Metric | Unit | Description | How obtained |
-  |---|---|---|---|
-  | `iter-energy/gpu` | Joules/iter/GPU | Energy consumed per training iteration per GPU. | Derived: `energy_monitor.lap() / total_iterations / world_size`. The energy monitor reads cumulative GPU energy via NVML. |
-  | `power/gpu` | Watts/GPU | Instantaneous power draw per GPU. | Derived: `energy / elapsed_time_per_iteration`. |
+  | Metric | Unit | How obtained |
+  |---|---|---|
+  | `iter-energy/gpu` | Joules/iter/GPU | The energy monitor reads cumulative GPU energy consumption via NVML (NVIDIA Management Library) at each logging interval. The per-iteration, per-GPU energy is: `energy_monitor.lap() / total_iterations / world_size`. The `.lap()` method returns the total energy consumed since the last call, measured by the GPU's onboard power sensor. |
+  | `power/gpu` | Watts/GPU | Derived from energy: `power = energy / elapsed_time_per_iteration`. This gives the average power draw per GPU during the logging interval (not instantaneous — it's smoothed over `log_interval` steps). |
 
-  These metrics require compatible GPU hardware and drivers (NVML). On systems without NVML support, they are simply not logged.
+  These metrics require compatible GPU hardware and drivers (NVML). On systems without NVML support (e.g., some container configurations), they are simply not logged. Typical H100 power draw during training is 500-700W depending on workload intensity.
 
   ---
 
@@ -220,9 +274,9 @@
 
   | Metric | When logged |
   |---|---|
-  | `lm loss validation` | Every `eval_interval` steps (single validation set). |
-  | `lm loss validation <dataset_name>` | Per-dataset validation loss (when `multiple_validation_sets: true`). The `<dataset_name>` is the basename of the validation data path. |
-  | `lm loss validation (aggregated)` | Mean across all validation datasets. |
+  | `lm loss validation` | Every `eval_interval` steps (single validation set). Computed identically to training `lm loss` — cross-entropy averaged over tokens — but on validation data without gradient computation. |
+  | `lm loss validation <dataset_name>` | Per-dataset validation loss (when `multiple_validation_sets: true`). The `<dataset_name>` is the basename of the validation data path. Each dataset is evaluated independently using `eval_iters` batches. |
+  | `lm loss validation (aggregated)` | Unweighted mean across all per-dataset validation losses. |
 
   See Section 3 below for the rationale behind multiple validation datasets and how to detect domain collapse.
 

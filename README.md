@@ -4,22 +4,25 @@
 
 ### Day 1: data pipeline in general, (EN & ID)
 
-- pdf extraction
-- dedup
-- filtering
-- language detection
-- quality classification
-- toxicity removal
-- PII protection
-- data generation
+- pdf extraction pipeline (pdf/img -> text)
 
-### Day 2a: rule-based and model-based quality classification
+- data preprocess pipeline (raw text -> clean and curated dataset)
+    - dedup
+    - filtering
+    - language detection
+    - quality classification
+    - toxicity removal
+    - PII protection
+    - data generation
 
-- rule-used in SeaPile (language specific)
-- ken-LM based classification (training and inference)
-- FineWebEdu classification with SOTA opensource models (toy data)
+- (tutorial) walkthrough of data preprocess pipeline
 
-### Day 2b: data preprocessing for Pretraining Framework, 
+- data classification
+    - rule-used in SeaPile (language specific)
+    - ken-LM based classification (training and inference)
+    - FineWebEdu classification with SOTA opensource models (toy data)
+
+### Day 2b: data preprocessing for Pretraining Framework
 
 - working principle of megatron dataset
     - variable sequence length handling
@@ -36,11 +39,11 @@
         - pull raw data from S3 based on data_config
         - convert (tokenize and binarize), multiprocessing vs pyspark
         - cleanup intermediate conversion files
-        - integrity check of dataset at each step (convert/merge)
+        - token count and integrity check
 
 - (tutorial) data integrity check after merging shards of converted dataset
 
-### Day 3: dataloading and datamix, 
+### Day 3: dataloading and datamix
 
 - SOTA datamix approaches
     - mitigate catastrophic forgetting
@@ -70,9 +73,8 @@
     - model merging
     - LoRA
 - context extension
-    - RoPE
-    - YaRN
-    - Context-Parallel (hyperlink to W2D3)
+    - ABN & YaRN 
+    - long context data composition
 
 ## Week 2: Model Training, ref: ARF-Training/train/scripts/smc_megatron_bridge
 
@@ -81,7 +83,6 @@
 - log file structure and intention
 - artifacts saving
 - W&B logging
-- (tutorial) custom W&B metric
 - checkpoint working principle (code walkthrough)
     - anatomy of checkpoint (data_load, parameter, optimizer state)
     - hf to megatron import
@@ -89,27 +90,33 @@
     - save the checkpoint
     - load the checkpoint
     - export the checkpoints to hf
+- (tutorial) custom W&B metric
 
 ### Day 2: training dynamics, etc.
 
 - optimizer
 - scheduler, implementation of custom scheduler in MegatronBridge
 - hyperparameters (GBS, lr, weight decay, epsilon, layer-specific)
+- (tutorial) WSD scheduler implementation
 
 ### Day 3: parallelism, memory management, throughput
 
-- vanilla training launch
-    - vRAM monitoring
-    - throughput metrics
-- parallelsim
+- efficiency (tutorial integrated)
+    - MBS
+    - recomputation
+    - activation offloading
+    - communication/computation overlap
+    - torch-profiling
+
+- parallelsim (tutorial integrated)
     - DDP
     - FSDP
     - TP
     - CP
-    - torch-profiling
+    - EP
 
 ### Day 4-5: readup on SOTA model training stuff
 
 - hyperparameter transfer
-- Attention Mechanism & Code Implementation (Kaparthy or LLM from scratch)
+- Attention Mechanism & Code Implementation
 - KV-cache & Code Implementation

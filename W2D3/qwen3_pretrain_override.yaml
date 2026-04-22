@@ -3,13 +3,13 @@
 # Top-level ConfigContainer fields are dataclasses themselves
 
 model:
-  tensor_model_parallel_size: 2
+  tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   pipeline_dtype: torch.bfloat16
   context_parallel_size: 1
   expert_model_parallel_size: 1
   sequence_parallel: false
-  seq_length: 16384
+  seq_length: 1024
   # Activation recomputation
   # See megatron-lm/megatron/core/transformer/transformer_config.py for explanation of parameters
   # Options are None (default), "full", "selective". Comment out next line to disable activation recomputation.
@@ -69,7 +69,7 @@ logger:
 
 dataset:
   # Must be equal to model.seq_length
-  sequence_length: 16384
+  sequence_length: 1024
 
 rng:
   seed: 1234
